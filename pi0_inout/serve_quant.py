@@ -106,6 +106,16 @@ _KNOWN_CONFIGS: dict[str, SimpleNamespace] = {
         action_horizon=15,
         max_token_len=200,
     ),
+    # pi0 droid joint-position Polaris (non-pi05)
+    "pi0_droid_jointpos_polaris": SimpleNamespace(
+        paligemma_variant="gemma_2b",
+        action_expert_variant="gemma_300m",
+        pi05=False,
+        dtype="bfloat16",
+        action_dim=32,
+        action_horizon=10,
+        max_token_len=100,
+    ),
     # pi0 droid joint-position (non-pi05)
     "pi0_droid": SimpleNamespace(
         paligemma_variant="gemma_2b",
