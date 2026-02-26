@@ -317,12 +317,17 @@ class Pi0PyTorchPolicy:
         tokenized_prompt      = torch.zeros(1, max_tok, dtype=torch.int64,  device=dev)
         tokenized_prompt_mask = torch.zeros(1, max_tok, dtype=torch.bool,   device=dev)
 
+        token_ar_mask   = torch.zeros(1, max_tok, dtype=torch.bool, device=dev)
+        token_loss_mask = torch.zeros(1, max_tok, dtype=torch.bool, device=dev)
+
         obs_ns = SimpleNamespace(
             images=images,
             image_masks=image_masks,
             state=state,
             tokenized_prompt=tokenized_prompt,
             tokenized_prompt_mask=tokenized_prompt_mask,
+            token_ar_mask=token_ar_mask,
+            token_loss_mask=token_loss_mask,
         )
 
         with torch.no_grad():
