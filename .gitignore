@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Results and outputs
+results/
+sweep_results/
+*.json
+*.csv
+*.mp4
+
+# Checkpoints and data
+*.safetensors
+*.pt
+*.pth
+data/
+
+# Logs
+*.log
+
+# Environment
+.env
+.venv/
