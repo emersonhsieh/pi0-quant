@@ -332,8 +332,8 @@ class Pi0PyTorchPolicy:
 
         with torch.no_grad():
             actions = self.model.sample_actions(str(dev), obs_ns, num_steps=10)
-        # actions: [1, action_horizon=15, action_dim=32]
-        return {"actions": actions.squeeze(0).cpu().numpy()}
+        # actions: [1, action_horizon=15, action_dim=32] -> slice to 8 (7 joints + 1 gripper)
+        return {"actions": actions.squeeze(0).cpu().numpy()[:, :8]}
 
 
 # ---------------------------------------------------------------------------
