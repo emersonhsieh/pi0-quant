@@ -75,8 +75,9 @@ import torch
 import torch.nn as nn
 
 # ── pi0_inout imports (quantization layer) ────────────────────────────────────
-from pi0_inout.quant_types import QuantFormat
+from pi0_inout.quant_types import QuantFormat, TORCH_DTYPE, FORMAT_BITS
 from pi0_inout.model_patcher import patch_model, list_linear_layers
+from pi0_inout.quant_linear import QuantLinear
 from pi0_inout.stats_tracker import StatsTracker
 
 
@@ -268,6 +269,130 @@ def _load_norm_stats(norm_stats_dir: str) -> dict:
             q99=np.array(val["q99"], dtype=np.float64) if val.get("q99") is not None else None,
         )
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Post-patch diagnostics
+# ---------------------------------------------------------------------------
+
+def print_quant_diagnostics(
+    model: nn.Module,
+    input_fmt: QuantFormat,
+    output_fmt: QuantFormat,
+) -> None:
+    """
+    Print model structure and memory analysis after quantization patching.
+    Shows that this is SIMULATED quantization (weights stay in original dtype).
+    """
+    print("\n" + "=" * 80)
+    print("QUANTIZATION DIAGNOSTICS")
+    print("=" * 80)
+
+    # 1. Layer inventory: count QuantLinear vs plain nn.Linear
+    n_quant = 0
+    n_plain = 0
+    total_params = 0
+    quant_params = 0
+    sample_layer = None
+
+    for name, module in model.named_modules():
+        if isinstance(module, QuantLinear):
+            n_quant += 1
+            n_params = module.weight.numel() + (module.bias.numel() if module.bias is not None else 0)
+            quant_params += n_params
+            total_params += n_params
+            if sample_layer is None:
+                sample_layer = (name, module)
+        elif type(module) is nn.Linear:
+            n_plain += 1
+            n_params = module.weight.numel() + (module.bias.numel() if module.bias is not None else 0)
+            total_params += n_params
+
+    print(f"\n[1] Layer counts:")
+    print(f"    QuantLinear layers: {n_quant}")
+    print(f"    Plain nn.Linear:   {n_plain}")
+    print(f"    Total parameters:  {total_params:,}")
+    print(f"    Quantized params:  {quant_params:,}")
+
+    # 2. Print a few representative QuantLinear layers
+    print(f"\n[2] Sample QuantLinear layers (first 5):")
+    print(f"    {'Name':<60s}  {'Weight dtype':<12s}  input_fmt    output_fmt")
+    print("    " + "-" * 110)
+    count = 0
+    for name, module in model.named_modules():
+        if isinstance(module, QuantLinear):
+            print(f"    {name:<60s}  {str(module.weight.dtype):<12s}  "
+                  f"{module.input_fmt.value:<12s} {module.output_fmt.value}")
+            count += 1
+            if count >= 5:
+                print(f"    ... ({n_quant - 5} more)")
+                break
+
+    # 3. Memory analysis
+    input_bits = FORMAT_BITS[input_fmt]["total"]
+    bf16_bits = 16
+
+    # Actual memory used (weights stay in original dtype)
+    actual_bytes = 0
+    for p in model.parameters():
+        actual_bytes += p.numel() * p.element_size()
+
+    # Hypothetical memory if weights were ACTUALLY stored in input_fmt
+    hypothetical_bytes = 0
+    for name, module in model.named_modules():
+        if isinstance(module, QuantLinear):
+            n = module.weight.numel() + (module.bias.numel() if module.bias is not None else 0)
+            hypothetical_bytes += n * (input_bits // 8)
+        elif type(module) is nn.Linear:
+            for p in module.parameters():
+                hypothetical_bytes += p.numel() * p.element_size()
+    # Add non-linear params at their actual size
+    linear_param_ids = set()
+    for name, module in model.named_modules():
+        if isinstance(module, (QuantLinear, nn.Linear)):
+            for p in module.parameters():
+                linear_param_ids.add(id(p))
+    for p in model.parameters():
+        if id(p) not in linear_param_ids:
+            hypothetical_bytes += p.numel() * p.element_size()
+
+    bf16_bytes = total_params * (bf16_bits // 8)
+
+    print(f"\n[3] Memory analysis:")
+    print(f"    Actual GPU memory (weights in original dtype): {actual_bytes / 1e9:.3f} GB")
+    print(f"    Hypothetical if stored as {input_fmt.value}:   {hypothetical_bytes / 1e9:.3f} GB")
+    print(f"    Reference bf16 size (linear params only):      {bf16_bytes / 1e9:.3f} GB")
+    print(f"    Compression ratio (hypothetical vs bf16):      {bf16_bytes / max(hypothetical_bytes, 1):.2f}x")
+    print(f"    NOTE: Actual memory is UNCHANGED — this is simulated quantization.")
+    print(f"          Weights are stored in {sample_layer[1].weight.dtype if sample_layer else 'N/A'}, "
+          f"cast through {input_fmt.value} at runtime.")
+
+    # 4. Verify quantization actually changes values (pick one weight tensor)
+    if sample_layer is not None:
+        name, layer = sample_layer
+        w = layer.weight.detach().float()
+        target_dtype = TORCH_DTYPE[input_fmt]
+        w_quant = w.to(target_dtype).to(w.dtype)
+        diff = (w - w_quant).abs()
+        n_changed = (diff > 0).sum().item()
+        n_total = w.numel()
+
+        print(f"\n[4] Quantization verification (layer: {name}):")
+        print(f"    Weight shape:        {tuple(w.shape)}")
+        print(f"    Weight dtype:        {layer.weight.dtype}")
+        print(f"    Target quant dtype:  {target_dtype}")
+        print(f"    Values changed:      {n_changed:,} / {n_total:,} "
+              f"({100 * n_changed / n_total:.1f}%)")
+        print(f"    Max abs difference:  {diff.max().item():.6e}")
+        print(f"    Mean abs difference: {diff.mean().item():.6e}")
+        if n_changed == 0 and input_fmt != QuantFormat.FLOAT32:
+            print(f"    WARNING: No values changed! Quantization may not be working.")
+        elif input_fmt == QuantFormat.FLOAT32:
+            print(f"    OK: FLOAT32 passthrough — zero difference expected.")
+        else:
+            print(f"    OK: Quantization is actively rounding values.")
+
+    print("\n" + "=" * 80 + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -470,6 +595,9 @@ def main() -> None:
         verbose=False,
     )
     logger.info(f"Model patched: input_fmt={input_fmt.value}  output_fmt={output_fmt.value}")
+
+    # ── Print quantization diagnostics ────────────────────────────────────
+    print_quant_diagnostics(model, input_fmt, output_fmt)
 
     # ── Register stats dump on exit ───────────────────────────────────────
     def _dump_stats() -> None:
